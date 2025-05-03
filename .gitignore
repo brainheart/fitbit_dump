@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# ignore tokens file
+tokens.json
+
+# ignore csv output
+*.csv
+

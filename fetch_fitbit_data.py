@@ -1,181 +1,202 @@
-#!/usr/bin/env python3
-"""
-Fitbit Data Export Script
--------------------------
-This script fetches the last 30 days of Fitbit data and saves it as a CSV file.
-"""
-
 import os
-import csv
-import requests
-import datetime
+import sys
 import json
+import uuid
+import datetime as dt
+import urllib.parse
+import webbrowser
+import http.server
+import socketserver
+import requests
+import pandas as pd
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
 
-# Load environment variables from .env file
+"""
+Fitbit Daily Exporter (zero‑manual‑token edition)
+=================================================
+Export the last *n* days (default 8) of daily Fitbit metrics to a CSV with columns:
+
+    Date, Weight, Calories Burned, Steps, Sleep Start Time, Sleep Stop Time, Minutes Asleep
+
+This version automates the OAuth flow: on the first run it pops open a browser,
+captures the redirect on a tiny local server, stores tokens in *tokens.json*,
+and refreshes them silently on subsequent runs.
+
+Setup
+-----
+1. Create a *Personal* Fitbit dev app → set callback `http://127.0.0.1:8080/`.
+2. Scopes **activity sleep weight profile**.
+3. `.env` file with:
+
+       FITBIT_CLIENT_ID=<id>
+       FITBIT_CLIENT_SECRET=<secret>
+
+4. `pip install requests pandas python-dotenv`.
+
+Run
+---
+    python fitbit_export.py            # 8 days → fitbit_export.csv
+    python fitbit_export.py 30 out.csv # 30 days → out.csv
+"""
+
 load_dotenv()
 
-class FitbitClient:
-    """Client for interacting with the Fitbit API"""
-    
-    BASE_URL = "https://api.fitbit.com/1"
-    
-    def __init__(self):
-        """Initialize the Fitbit client with credentials from environment variables"""
-        self.client_id = os.getenv("FITBIT_CLIENT_ID")
-        self.client_secret = os.getenv("FITBIT_CLIENT_SECRET")
-        self.access_token = os.getenv("FITBIT_ACCESS_TOKEN")
-        self.refresh_token = os.getenv("FITBIT_REFRESH_TOKEN")
-        
-        if not all([self.client_id, self.client_secret, self.access_token, self.refresh_token]):
-            raise ValueError("Missing Fitbit API credentials in .env file")
-        
-        self.headers = {
-            "Authorization": f"Bearer {self.access_token}"
-        }
-    
-    def refresh_access_token(self):
-        """Refresh the access token if it has expired"""
-        url = "https://api.fitbit.com/oauth2/token"
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_id": self.client_id
-        }
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": f"Basic {self.client_secret}"
-        }
-        
-        response = requests.post(url, data=payload, headers=headers)
-        if response.status_code == 200:
-            tokens = response.json()
-            self.access_token = tokens["access_token"]
-            self.refresh_token = tokens["refresh_token"]
-            self.headers["Authorization"] = f"Bearer {self.access_token}"
-            
-            # Update tokens in environment variables
-            os.environ["FITBIT_ACCESS_TOKEN"] = self.access_token
-            os.environ["FITBIT_REFRESH_TOKEN"] = self.refresh_token
-            
-            print("Access token refreshed successfully")
+CLIENT_ID = os.getenv("FITBIT_CLIENT_ID")
+CLIENT_SECRET = os.getenv("FITBIT_CLIENT_SECRET")
+TOKEN_URL = "https://api.fitbit.com/oauth2/token"
+API_BASE = "https://api.fitbit.com"
+CALLBACK_URI = "http://localhost:8080/"
+TOKEN_FILE = "tokens.json"
+
+#----------------------------------------------------------------------
+# Token helpers
+#----------------------------------------------------------------------
+
+def _load_tokens():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_tokens(tokens: dict):
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(tokens, f)
+
+_tokens = _load_tokens()
+ACCESS_TOKEN = _tokens.get("access_token")
+REFRESH_TOKEN = _tokens.get("refresh_token")
+
+_headers = lambda token: {"Authorization": f"Bearer {token}", "Accept-Language": "en_US"}
+
+#----------------------------------------------------------------------
+# Interactive authorisation (first‑run only)
+#----------------------------------------------------------------------
+class _AuthHandler(http.server.BaseHTTPRequestHandler):
+    """Capture the ?code=… redirect & stash it on the server object."""
+    server_version = "FitbitAuth/0.2"
+    def log_message(self, *_):
+        pass  # suppress default logging to stderr
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        if "code" in params:
+            self.server.auth_code = params["code"][0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            html = "<h1>Authorisation received — you may close this window.</h1>"
+            self.wfile.write(html.encode("utf-8"))
         else:
-            print(f"Failed to refresh token: {response.text}")
-    
-    def handle_api_call(self, url):
-        """Generic method to handle API calls with token refresh if needed"""
-        response = requests.get(url, headers=self.headers)
-        
-        if response.status_code == 401:  # Token expired
-            self.refresh_access_token()
-            response = requests.get(url, headers=self.headers)
-            
-        if response.status_code != 200:
-            print(f"API call failed with status {response.status_code}: {response.text}")
-            return None
-        
-        return response.json()
-    
-    def get_weight(self, date):
-        """Get weight data for a specific date"""
-        url = f"{self.BASE_URL}/user/-/body/log/weight/date/{date}.json"
-        data = self.handle_api_call(url)
-        
-        if not data or not data.get("weight"):
-            return None
-        
-        return data["weight"][0]["weight"] if data["weight"] else None
-    
-    def get_activity(self, date):
-        """Get activity data (calories and steps) for a specific date"""
-        url = f"{self.BASE_URL}/user/-/activities/date/{date}.json"
-        data = self.handle_api_call(url)
-        
-        if not data:
-            return None, None
-        
-        calories = data.get("summary", {}).get("caloriesOut", None)
-        steps = data.get("summary", {}).get("steps", None)
-        
-        return calories, steps
-    
-    def get_sleep(self, date):
-        """Get sleep data for a specific date"""
-        url = f"{self.BASE_URL}/user/-/sleep/date/{date}.json"
-        data = self.handle_api_call(url)
-        
-        if not data or not data.get("sleep") or len(data["sleep"]) == 0:
-            return None, None, None
-        
-        # Get the main sleep record (not naps)
-        main_sleep = None
-        for sleep_record in data["sleep"]:
-            if sleep_record.get("isMainSleep", False):
-                main_sleep = sleep_record
-                break
-        
-        if not main_sleep:
-            main_sleep = data["sleep"][0]  # Take the first one if no main sleep is marked
-        
-        start_time = main_sleep.get("startTime", None)
-        end_time = main_sleep.get("endTime", None)
-        minutes_asleep = main_sleep.get("minutesAsleep", None)
-        
-        return start_time, end_time, minutes_asleep
+            self.send_error(400, "Missing code parameter")
 
-def generate_date_range(days=30):
-    """Generate a list of dates for the last N days"""
-    today = datetime.now()
-    date_list = []
-    
-    for i in range(days):
-        date = today - timedelta(days=i)
-        date_str = date.strftime("%Y-%m-%d")
-        date_list.append(date_str)
-    
-    return date_list
 
-def main():
-    """Main function to fetch data and create CSV"""
-    try:
-        client = FitbitClient()
-        date_range = generate_date_range(30)
-        
-        # Prepare CSV file
-        csv_filename = f"fitbit_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        csv_headers = [
-            "Date", "Weight", "Calories Burned", "Steps", 
-            "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep"
-        ]
-        
-        with open(csv_filename, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(csv_headers)
-            
-            # Iterate through each date
-            for date in date_range:
-                print(f"Fetching data for {date}...")
-                
-                # Get weight data
-                weight = client.get_weight(date)
-                
-                # Get activity data
-                calories, steps = client.get_activity(date)
-                
-                # Get sleep data
-                sleep_start, sleep_end, minutes_asleep = client.get_sleep(date)
-                
-                # Write row to CSV
-                writer.writerow([
-                    date, weight, calories, steps, 
-                    sleep_start, sleep_end, minutes_asleep
-                ])
-        
-        print(f"Data successfully exported to {csv_filename}")
-        
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+def _interactive_authorise() -> dict:
+    print("🔑  Opening browser for Fitbit consent…")
+    state = uuid.uuid4().hex
+    params = {
+        "response_type": "code",
+        "client_id": CLIENT_ID,
+        "redirect_uri": CALLBACK_URI,
+        "scope": "activity sleep weight profile",
+        "state": state,
+        "expires_in": 604800,
+    }
+    webbrowser.open(f"https://www.fitbit.com/oauth2/authorize?{urllib.parse.urlencode(params)}")
 
+    with socketserver.TCPServer(("", 8080), _AuthHandler) as httpd:
+        httpd.auth_code = None
+        while httpd.auth_code is None:
+            httpd.handle_request()
+        code = httpd.auth_code
+
+    auth = (CLIENT_ID, CLIENT_SECRET)
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": CLIENT_ID,
+        "code": code,
+        "redirect_uri": CALLBACK_URI,
+    }
+    resp = requests.post(TOKEN_URL, auth=auth, data=data)
+    resp.raise_for_status()
+    tokens = resp.json()
+    _save_tokens(tokens)
+    print("✅  Tokens saved to tokens.json")
+    return tokens
+
+#----------------------------------------------------------------------
+# Token refresh
+#----------------------------------------------------------------------
+
+def _refresh_access_token():
+    global ACCESS_TOKEN, REFRESH_TOKEN
+    auth = (CLIENT_ID, CLIENT_SECRET)
+    data = {"grant_type": "refresh_token", "refresh_token": REFRESH_TOKEN}
+    resp = requests.post(TOKEN_URL, auth=auth, data=data)
+    resp.raise_for_status()
+    tokens = resp.json()
+    ACCESS_TOKEN = tokens["access_token"]
+    REFRESH_TOKEN = tokens["refresh_token"]
+    _save_tokens(tokens)
+
+
+def _get(url: str) -> dict:
+    resp = requests.get(url, headers=_headers(ACCESS_TOKEN))
+    if resp.status_code == 401:
+        _refresh_access_token()
+        resp = requests.get(url, headers=_headers(ACCESS_TOKEN))
+    resp.raise_for_status()
+    return resp.json()
+
+#----------------------------------------------------------------------
+# Metric fetchers
+#----------------------------------------------------------------------
+
+def _fetch_day(date_str: str) -> dict:
+    wt = _get(f"{API_BASE}/1/user/-/body/log/weight/date/{date_str}.json")
+    weight = wt["weight"][-1]["weight"] if wt["weight"] else None
+
+    act = _get(f"{API_BASE}/1/user/-/activities/date/{date_str}.json")
+    steps = act["summary"].get("steps")
+    calories = act["summary"].get("caloriesOut")
+
+    slp = _get(f"{API_BASE}/1.2/user/-/sleep/date/{date_str}.json")
+    sleep_start = sleep_end = minutes_asleep = None
+    if slp.get("sleep"):
+        main = next((l for l in slp["sleep"] if l.get("isMainSleep")), slp["sleep"][0])
+        sleep_start, sleep_end, minutes_asleep = main["startTime"], main["endTime"], main["minutesAsleep"]
+
+    return {
+        "Date": date_str,
+        "Weight": weight,
+        "Calories Burned": calories,
+        "Steps": steps,
+        "Sleep Start Time": sleep_start,
+        "Sleep Stop Time": sleep_end,
+        "Minutes Asleep": minutes_asleep,
+    }
+
+#----------------------------------------------------------------------
+# Export logic
+#----------------------------------------------------------------------
+
+def export_last_n_days(n: int = 8, outfile: str = "fitbit_export.csv"):
+    today = dt.date.today()
+    rows = [_fetch_day((today - dt.timedelta(days=i)).isoformat()) for i in range(n)]
+    pd.DataFrame(rows).to_csv(outfile, index=False)
+    print(f"✨  Saved {outfile} with {n} days of data.")
+
+#----------------------------------------------------------------------
+# Entrypoint
+#----------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    if not CLIENT_ID or not CLIENT_SECRET:
+        sys.exit("❌  Add FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET to .env first!")
+
+    if not (ACCESS_TOKEN and REFRESH_TOKEN):
+        toks = _interactive_authorise()
+        ACCESS_TOKEN, REFRESH_TOKEN = toks["access_token"], toks["refresh_token"]
+
+    days = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+    csv_name = sys.argv[2] if len(sys.argv) > 2 else "fitbit_export.csv"
+    export_last_n_days(days, csv_name)
