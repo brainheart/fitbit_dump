@@ -48,18 +48,36 @@ FITBIT_REFRESH_TOKEN=your_refresh_token_here
 
 ## Usage
 
-Run the script:
+Run the script with one of the following options:
 
 ```bash
-python fetch_fitbit_data.py
+# Default: get last 8 days of data
+python fitbit_export.py
+
+# Get a specified number of days from today
+python fitbit_export.py --days 30 --output my_data.csv
+
+# Get data for a specific date range
+python fitbit_export.py --start 2025-04-01 --end 2025-04-30
+
+# Get data for a single specific date
+python fitbit_export.py --date 2025-04-15
+```
+
+For backwards compatibility, you can also use the original positional arguments:
+
+```bash
+python fitbit_export.py 30 my_data.csv  # 30 days → my_data.csv
 ```
 
 The script will:
-1. Fetch data for the last 30 days
-2. Export the data to a CSV file named `fitbit_data_YYYYMMDD_HHMMSS.csv` in the current directory
-3. Handle token refresh if your access token has expired
+1. Authenticate with Fitbit on first run (opens a browser window)
+2. Fetch the requested data one day at a time
+3. Write each day's data to the CSV as soon as it's retrieved
+4. Handle token refresh if your access token has expired
 
 ## Notes
 
+- The script writes data incrementally, so if it's interrupted, you'll still have partial data
 - The script uses the Fitbit API which has rate limits. If you encounter rate limiting issues, the script may fail.
 - Some data may be missing if you didn't record it on your Fitbit device (e.g., if you didn't wear your device while sleeping).
