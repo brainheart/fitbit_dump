@@ -41,6 +41,8 @@ Run
     python fitbit_export.py --days 30 --output out.csv  # 30 days → out.csv
     python fitbit_export.py --start 2025-04-01 --end 2025-04-30  # Specific date range
     python fitbit_export.py --date 2025-04-15   # Single date
+    python fitbit_export.py --days 30 --desc     # Process from newest to oldest
+    python fitbit_export.py --start 2025-01-01 --end 2025-04-30 --asc  # Process from oldest to newest (default)
 """
 
 load_dotenv()
@@ -185,16 +187,33 @@ def _fetch_day(date_str: str) -> dict:
 # Export logic
 #----------------------------------------------------------------------
 
-def export_data(date_range: list, outfile: str = "fitbit_export.csv"):
+def export_data(date_range: list, outfile: str = "fitbit_export.csv", ascending: bool = True):
     """
     Export Fitbit data for the given date range to a CSV file.
     Writes data incrementally, one row at a time.
+    
+    Args:
+        date_range: List of date objects to process
+        outfile: Output CSV filename
+        ascending: If True, process dates from oldest to newest; if False, process newest to oldest
     """
     # CSV column headers
     columns = ["Date", "Weight", "Calories Burned", "Steps", "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep"]
     
     # Create new CSV file with headers or append to existing if it exists
     file_exists = os.path.exists(outfile)
+    
+    # Sort the date range based on the ascending parameter
+    if ascending:
+        # Sort from oldest to newest (ascending)
+        date_range.sort()
+        date_order = "oldest to newest"
+    else:
+        # Sort from newest to oldest (descending)
+        date_range.sort(reverse=True)
+        date_order = "newest to oldest"
+        
+    print(f"🔄 Processing dates in {date_order} order")
     
     with open(outfile, mode='a' if file_exists else 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
@@ -260,6 +279,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default="fitbit_export.csv",
                      help="Output CSV filename (default: fitbit_export.csv)")
     
+    # Add sort order control - mutually exclusive group for asc/desc
+    order_group = parser.add_mutually_exclusive_group()
+    order_group.add_argument("--asc", action="store_true", 
+                     help="Process dates from oldest to newest (default)")
+    order_group.add_argument("--desc", action="store_true",
+                     help="Process dates from newest to oldest")
+                     
     # For backwards compatibility with positional args
     parser.add_argument("days_pos", nargs="?", type=int, 
                       help=argparse.SUPPRESS)
@@ -300,5 +326,8 @@ if __name__ == "__main__":
         date_range = [today - dt.timedelta(days=i) for i in range(days)]
         print(f"🗓️ Fetching data for the last {days} days")
     
+    # Determine sort order (default is ascending - oldest to newest)
+    ascending = not args.desc
+    
     # Export the data
-    export_data(date_range, args.output)
+    export_data(date_range, args.output, ascending)
