@@ -9,12 +9,14 @@ import http.server
 import socketserver
 import requests
 import pandas as pd
+import csv
+import argparse
 from dotenv import load_dotenv
 
 """
 Fitbit Daily Exporter (zero‑manual‑token edition)
 =================================================
-Export the last *n* days (default 8) of daily Fitbit metrics to a CSV with columns:
+Export the last *n* days (default 8) of daily Fitbit metrics to a CSV with columns:
 
     Date, Weight, Calories Burned, Steps, Sleep Start Time, Sleep Stop Time, Minutes Asleep
 
@@ -35,8 +37,10 @@ Setup
 
 Run
 ---
-    python fitbit_export.py            # 8 days → fitbit_export.csv
-    python fitbit_export.py 30 out.csv # 30 days → out.csv
+    python fitbit_export.py                      # 8 days → fitbit_export.csv
+    python fitbit_export.py --days 30 --output out.csv  # 30 days → out.csv
+    python fitbit_export.py --start 2025-04-01 --end 2025-04-30  # Specific date range
+    python fitbit_export.py --date 2025-04-15   # Single date
 """
 
 load_dotenv()
@@ -153,6 +157,7 @@ def _get(url: str) -> dict:
 #----------------------------------------------------------------------
 
 def _fetch_day(date_str: str) -> dict:
+    print(f"📆 Fetching data for {date_str}...")
     wt = _get(f"{API_BASE}/1/user/-/body/log/weight/date/{date_str}.json")
     weight = wt["weight"][-1]["weight"] if wt["weight"] else None
 
@@ -180,23 +185,120 @@ def _fetch_day(date_str: str) -> dict:
 # Export logic
 #----------------------------------------------------------------------
 
-def export_last_n_days(n: int = 8, outfile: str = "fitbit_export.csv"):
-    today = dt.date.today()
-    rows = [_fetch_day((today - dt.timedelta(days=i)).isoformat()) for i in range(n)]
-    pd.DataFrame(rows).to_csv(outfile, index=False)
-    print(f"✨  Saved {outfile} with {n} days of data.")
+def export_data(date_range: list, outfile: str = "fitbit_export.csv"):
+    """
+    Export Fitbit data for the given date range to a CSV file.
+    Writes data incrementally, one row at a time.
+    """
+    # CSV column headers
+    columns = ["Date", "Weight", "Calories Burned", "Steps", "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep"]
+    
+    # Create new CSV file with headers or append to existing if it exists
+    file_exists = os.path.exists(outfile)
+    
+    with open(outfile, mode='a' if file_exists else 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        
+        # Write headers only if creating a new file
+        if not file_exists:
+            writer.writeheader()
+        
+        total_days = len(date_range)
+        for i, date_obj in enumerate(date_range, 1):
+            try:
+                date_str = date_obj.isoformat()
+                row_data = _fetch_day(date_str)
+                
+                # Write single row to CSV immediately
+                writer.writerow(row_data)
+                f.flush()  # Ensure data is written to disk immediately
+                
+                print(f"✓ [{i}/{total_days}] Saved data for {date_str}")
+            except Exception as e:
+                print(f"❌ Error fetching data for {date_str}: {e}")
+    
+    print(f"✨ Completed! Data saved to {outfile}")
+
+
+def generate_date_range(start_date, end_date):
+    """Generate a list of dates between start_date and end_date (inclusive)."""
+    delta = (end_date - start_date).days + 1
+    return [start_date + dt.timedelta(days=i) for i in range(delta)]
+
+
+def parse_date(date_str):
+    """Parse date string in YYYY-MM-DD format."""
+    try:
+        return dt.date.fromisoformat(date_str)
+    except ValueError:
+        sys.exit(f"❌ Invalid date format: {date_str}. Please use YYYY-MM-DD format.")
 
 #----------------------------------------------------------------------
 # Entrypoint
 #----------------------------------------------------------------------
 if __name__ == "__main__":
     if not CLIENT_ID or not CLIENT_SECRET:
-        sys.exit("❌  Add FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET to .env first!")
+        sys.exit("❌ Add FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET to .env first!")
 
     if not (ACCESS_TOKEN and REFRESH_TOKEN):
         toks = _interactive_authorise()
         ACCESS_TOKEN, REFRESH_TOKEN = toks["access_token"], toks["refresh_token"]
 
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-    csv_name = sys.argv[2] if len(sys.argv) > 2 else "fitbit_export.csv"
-    export_last_n_days(days, csv_name)
+    # Set up argument parser for more flexible date range options
+    parser = argparse.ArgumentParser(description="Export Fitbit data to CSV")
+    
+    date_group = parser.add_mutually_exclusive_group()
+    date_group.add_argument("--days", type=int, default=8,
+                     help="Number of days to fetch from today (default: 8)")
+    date_group.add_argument("--date", type=str,
+                     help="Specific date to fetch (format: YYYY-MM-DD)")
+    date_group.add_argument("--start", type=str,
+                     help="Start date for range (format: YYYY-MM-DD)")
+    
+    parser.add_argument("--end", type=str,
+                     help="End date for range (format: YYYY-MM-DD)")
+    parser.add_argument("--output", type=str, default="fitbit_export.csv",
+                     help="Output CSV filename (default: fitbit_export.csv)")
+    
+    # For backwards compatibility with positional args
+    parser.add_argument("days_pos", nargs="?", type=int, 
+                      help=argparse.SUPPRESS)
+    parser.add_argument("output_pos", nargs="?", type=str,
+                      help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+
+    # Handle backwards compatibility with positional arguments
+    if args.days_pos is not None:
+        args.days = args.days_pos
+    if args.output_pos is not None:
+        args.output = args.output_pos
+
+    # Determine date range based on arguments
+    today = dt.date.today()
+    
+    if args.date:
+        # Single date
+        single_date = parse_date(args.date)
+        date_range = [single_date]
+        print(f"🗓️ Fetching data for {args.date}")
+    elif args.start:
+        # Date range with explicit start
+        start_date = parse_date(args.start)
+        
+        # If end date not provided, use today
+        end_date = parse_date(args.end) if args.end else today
+        
+        if start_date > end_date:
+            sys.exit("❌ Start date cannot be after end date")
+            
+        date_range = generate_date_range(start_date, end_date)
+        print(f"🗓️ Fetching data from {start_date.isoformat()} to {end_date.isoformat()} ({len(date_range)} days)")
+    else:
+        # Default: last N days
+        days = args.days
+        date_range = [today - dt.timedelta(days=i) for i in range(days)]
+        print(f"🗓️ Fetching data for the last {days} days")
+    
+    # Export the data
+    export_data(date_range, args.output)
