@@ -37,12 +37,12 @@ Setup
 
 Run
 ---
-    python fitbit_export.py                      # 8 days → fitbit_export.csv
-    python fitbit_export.py --days 30 --output out.csv  # 30 days → out.csv
+    python fitbit_export.py                      # 8 days → fitbit_export-YYYY-MM-DD_to_YYYY-MM-DD.csv
+    python fitbit_export.py --days 30            # 30 days → fitbit_export-YYYY-MM-DD_to_YYYY-MM-DD.csv
     python fitbit_export.py --start 2025-04-01 --end 2025-04-30  # Specific date range
-    python fitbit_export.py --date 2025-04-15   # Single date
+    python fitbit_export.py --date 2025-04-15    # Single date
     python fitbit_export.py --days 30 --desc     # Process from newest to oldest
-    python fitbit_export.py --start 2025-01-01 --end 2025-04-30 --asc  # Process from oldest to newest (default)
+    python fitbit_export.py --output custom.csv  # Use custom filename without date range
 """
 
 load_dotenv()
@@ -53,6 +53,9 @@ TOKEN_URL = "https://api.fitbit.com/oauth2/token"
 API_BASE = "https://api.fitbit.com"
 CALLBACK_URI = "http://localhost:8080/"
 TOKEN_FILE = "tokens.json"
+
+# Default output filename without extension
+DEFAULT_OUTPUT_BASE = "fitbit_export"
 
 #----------------------------------------------------------------------
 # Token helpers
@@ -187,16 +190,48 @@ def _fetch_day(date_str: str) -> dict:
 # Export logic
 #----------------------------------------------------------------------
 
-def export_data(date_range: list, outfile: str = "fitbit_export.csv", ascending: bool = True):
+def generate_output_filename(date_range, user_specified_filename=None):
+    """
+    Generate a filename that includes the date range.
+    If user specified a filename, use that instead.
+    
+    Args:
+        date_range: List of date objects
+        user_specified_filename: User-provided filename (optional)
+        
+    Returns:
+        Filename string with date range (if applicable)
+    """
+    if user_specified_filename:
+        return user_specified_filename
+        
+    # Find the min and max dates
+    if not date_range:
+        return f"{DEFAULT_OUTPUT_BASE}.csv"
+        
+    min_date = min(date_range).isoformat()
+    max_date = max(date_range).isoformat()
+    
+    # Create filename with date range
+    return f"{DEFAULT_OUTPUT_BASE}-{min_date}_to_{max_date}.csv"
+
+def export_data(date_range: list, outfile: str = None, ascending: bool = True, include_date_range: bool = True):
     """
     Export Fitbit data for the given date range to a CSV file.
     Writes data incrementally, one row at a time.
     
     Args:
         date_range: List of date objects to process
-        outfile: Output CSV filename
+        outfile: Output CSV filename or None to auto-generate
         ascending: If True, process dates from oldest to newest; if False, process newest to oldest
+        include_date_range: If True and outfile is None, include date range in filename
     """
+    # Generate appropriate filename if not explicitly provided
+    if include_date_range and outfile is None:
+        outfile = generate_output_filename(date_range)
+    elif outfile is None:
+        outfile = f"{DEFAULT_OUTPUT_BASE}.csv"
+    
     # CSV column headers
     columns = ["Date", "Weight", "Calories Burned", "Steps", "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep"]
     
@@ -214,6 +249,7 @@ def export_data(date_range: list, outfile: str = "fitbit_export.csv", ascending:
         date_order = "newest to oldest"
         
     print(f"🔄 Processing dates in {date_order} order")
+    print(f"📝 Output file: {outfile}")
     
     with open(outfile, mode='a' if file_exists else 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
@@ -276,8 +312,10 @@ if __name__ == "__main__":
     
     parser.add_argument("--end", type=str,
                      help="End date for range (format: YYYY-MM-DD)")
-    parser.add_argument("--output", type=str, default="fitbit_export.csv",
-                     help="Output CSV filename (default: fitbit_export.csv)")
+    parser.add_argument("--output", type=str,
+                     help="Output CSV filename (default: auto-generated with date range)")
+    parser.add_argument("--no-date-in-filename", action="store_true",
+                     help="Don't include date range in output filename")
     
     # Add sort order control - mutually exclusive group for asc/desc
     order_group = parser.add_mutually_exclusive_group()
@@ -330,4 +368,5 @@ if __name__ == "__main__":
     ascending = not args.desc
     
     # Export the data
-    export_data(date_range, args.output, ascending)
+    include_date_range = not args.no_date_in_filename
+    export_data(date_range, args.output, ascending, include_date_range)
