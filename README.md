@@ -4,14 +4,14 @@ A Python script to export the last 30 days of Fitbit data to a CSV file.
 
 ## Data Exported
 
-The script exports the following Fitbit data for each day:
+The script exports the following Fitbit data for each day (in this column order):
 - Date
-- Weight
-- Calories Burned
-- Steps
 - Sleep Start Time
 - Sleep Stop Time
 - Minutes Asleep
+- Steps
+- Calories Burned
+- Weight
 
 ## Setup
 

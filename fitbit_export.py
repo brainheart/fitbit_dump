@@ -178,12 +178,12 @@ def _fetch_day(date_str: str) -> dict:
 
     return {
         "Date": date_str,
-        "Weight": weight,
-        "Calories Burned": calories,
-        "Steps": steps,
         "Sleep Start Time": sleep_start,
         "Sleep Stop Time": sleep_end,
         "Minutes Asleep": minutes_asleep,
+        "Steps": steps,
+        "Calories Burned": calories,
+        "Weight": weight,
     }
 
 #----------------------------------------------------------------------
@@ -233,7 +233,7 @@ def export_data(date_range: list, outfile: str = None, ascending: bool = True, i
         outfile = f"{DEFAULT_OUTPUT_BASE}.csv"
     
     # CSV column headers
-    columns = ["Date", "Weight", "Calories Burned", "Steps", "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep"]
+    columns = ["Date", "Sleep Start Time", "Sleep Stop Time", "Minutes Asleep", "Steps", "Calories Burned", "Weight"]
     
     # Create new CSV file with headers or append to existing if it exists
     file_exists = os.path.exists(outfile)
