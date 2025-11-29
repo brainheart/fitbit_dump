@@ -8,7 +8,6 @@ import webbrowser
 import http.server
 import socketserver
 import requests
-import pandas as pd
 import csv
 import argparse
 from dotenv import load_dotenv
